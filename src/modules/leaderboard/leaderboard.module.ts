@@ -20,6 +20,8 @@ import { LeaderboardService } from './leaderboard.service';
 @Module({
   controllers: [LeaderboardController],
   providers: [LeaderboardService, LeaderboardRepository],
-  exports: [LeaderboardService],
+  // `LeaderboardRepository` is exported so the profile composite can look up a
+  // viewer's own rank without reimplementing the `RANK() OVER (...)` query.
+  exports: [LeaderboardService, LeaderboardRepository],
 })
 export class LeaderboardModule {}
