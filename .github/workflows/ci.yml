@@ -1,0 +1,163 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  # Fast feedback: everything that needs no services runs first and fails in
+  # under a minute.
+  static:
+    name: Lint · types · unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: Format check
+        run: npx prettier --check "src/**/*.ts" "test/**/*.ts"
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test -- --ci
+
+      - name: Migrations are in sync with the schema
+        # `drizzle-kit generate` is deterministic: if it produces a new file, a
+        # schema change was committed without its migration.
+        run: |
+          npx drizzle-kit generate
+          if [ -n "$(git status --porcelain drizzle)" ]; then
+            echo "::error::src/db/schema changed without a generated migration. Run 'npm run db:generate' and commit the result."
+            git --no-pager diff --stat drizzle
+            exit 1
+          fi
+
+  integration:
+    name: Integration (Postgres + Redis)
+    runs-on: ubuntu-latest
+    needs: static
+
+    # Service containers rather than Testcontainers *inside CI*: the runner
+    # already gives us real Postgres and Redis, so starting a second pair from
+    # within the job would be docker-in-docker for nothing. The harness reads
+    # TEST_DATABASE_URL and uses them; locally, with it unset, it falls back to
+    # Testcontainers so a laptop needs no compose file.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: cubeclash
+          POSTGRES_PASSWORD: cubeclash
+          POSTGRES_DB: cubeclash_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cubeclash -d cubeclash_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      TEST_DATABASE_URL: postgres://cubeclash:cubeclash@localhost:5432/cubeclash_test
+      DATABASE_URL: postgres://cubeclash:cubeclash@localhost:5432/cubeclash_test
+      REDIS_URL: redis://localhost:6379
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: Apply migrations
+        run: npm run db:migrate
+
+      - name: Integration tests
+        run: npm run test:e2e
+
+  docker:
+    name: Docker image builds
+    runs-on: ubuntu-latest
+    needs: static
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: cubeclash-backend:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Container starts and reports liveness
+        # Boots the real image against throwaway datastores. Catches the class
+        # of bug where the app runs from source but the pruned production image
+        # is missing something.
+        run: |
+          docker network create cubeclash-ci
+          docker run -d --name pg --network cubeclash-ci \
+            -e POSTGRES_USER=cubeclash -e POSTGRES_PASSWORD=cubeclash -e POSTGRES_DB=cubeclash \
+            postgres:16-alpine
+          docker run -d --name redis --network cubeclash-ci redis:7-alpine
+
+          for i in $(seq 1 30); do
+            docker exec pg pg_isready -U cubeclash -d cubeclash && break
+            sleep 2
+          done
+
+          docker run -d --name api --network cubeclash-ci -p 3000:3000 \
+            -e DATABASE_URL=postgres://cubeclash:cubeclash@pg:5432/cubeclash \
+            -e REDIS_URL=redis://redis:6379 \
+            -e JWT_ACCESS_SECRET=ci-access-secret-that-is-long-enough-here \
+            -e JWT_REFRESH_SECRET=ci-refresh-secret-that-is-long-enough-xx \
+            cubeclash-backend:ci
+
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:3000/health/live; then
+              echo "\n✓ container healthy"
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo "::error::container never became healthy"
+          docker logs api
+          exit 1

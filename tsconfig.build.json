@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // Required explicitly from TypeScript 6 on, and it is what keeps the build
+    // output flat (`dist/main.js`) rather than nested under `dist/src/`.
+    "rootDir": "./src",
+    // Inside dist/ on purpose. nest-cli's `deleteOutDir` wipes dist before a
+    // build; if the incremental cache outlived it, tsc would decide everything
+    // was up to date and emit nothing into the now-empty directory.
+    "tsBuildInfoFile": "./dist/.tsbuildinfo"
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "test", "dist", "**/*spec.ts", "drizzle.config.ts"]
+}

@@ -1,0 +1,39 @@
+{
+  "compilerOptions": {
+    "module": "commonjs",
+    "declaration": true,
+    "removeComments": true,
+    "emitDecoratorMetadata": true,
+    "experimentalDecorators": true,
+    "allowSyntheticDefaultImports": true,
+    "target": "ES2023",
+    "sourceMap": true,
+    "outDir": "./dist",
+    "incremental": true,
+    // Out of the project root, and separate from the build's — see
+    // tsconfig.build.json for why that one lives inside dist/.
+    "tsBuildInfoFile": "./node_modules/.cache/tsc/typecheck.tsbuildinfo",
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "strict": true,
+    "strictNullChecks": true,
+    "strictBindCallApply": true,
+    "noImplicitAny": true,
+    "forceConsistentCasingInFileNames": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    // TypeScript 6 no longer pulls every package in node_modules/@types into
+    // the global scope, so the two that provide globals are named explicitly.
+    "types": ["node", "jest"],
+    // No `baseUrl`: deprecated in TypeScript 6, removed in 7. Path mappings are
+    // resolved relative to this file instead.
+    "paths": {
+      "src/*": ["./src/*"]
+    }
+  },
+  "include": ["src/**/*", "test/**/*", "drizzle.config.ts"],
+  "exclude": ["node_modules", "dist"]
+}
