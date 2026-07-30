@@ -1,18 +1,25 @@
 import { Module } from '@nestjs/common';
 
-/**
- * Per-event aggregates: best, ao5 / ao12 / ao100, per-source averages,
- * distribution, efficiency index.
+import { SolvesModule } from '../solves/solves.module';
+import { StatsController } from './stats.controller';
+import { StatsService } from './stats.service';
 
- * The rolling-average windows are hand-written SQL behind the repository
- * interface. That is deliberate: window functions are exactly where a typed
- * query builder stops paying for itself, and this is the part worth being able
- * to explain out loud.
+/**
+ * Per-event aggregates: best single, ao5 / ao12 / ao100, session average, PB
+ * count, solve count.
+ *
+ * A **read model**, not new storage — there is no `stats` table and no cached
+ * aggregate. It reuses `SolvesModule`'s ranked history (hence the import) so the
+ * ranking key and `is_pb` are computed once, in SQL, and never diverge from the
+ * leaderboard or the profile. The trimmed-mean windows live in `average.ts` as a
+ * pure, unit-tested function rather than a window query — see `StatsService` for
+ * why.
  *
  * Endpoints: GET /stats
- *
- * Not implemented yet — registered so the module graph matches the documented
- * architecture from the first commit.
  */
-@Module({})
+@Module({
+  imports: [SolvesModule],
+  controllers: [StatsController],
+  providers: [StatsService],
+})
 export class StatsModule {}

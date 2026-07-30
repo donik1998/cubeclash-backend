@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
 
+import { SolvesController } from './solves.controller';
 import { SolvesRepository } from './solves.repository';
+import { SolvesService } from './solves.service';
 
 /**
  * The core practice record.
@@ -15,10 +17,13 @@ import { SolvesRepository } from './solves.repository';
  *
  * Endpoints: POST /solves · GET /solves · PATCH /solves/:id · DELETE /solves/:id
  *
- * Controller and service still to come; the repository is built.
+ * The controller, service and repository are all built. `SolvesRepository` is
+ * exported because the profile and stats read models reuse its ranked history
+ * rather than reimplementing `is_pb`.
  */
 @Module({
-  providers: [SolvesRepository],
+  controllers: [SolvesController],
+  providers: [SolvesService, SolvesRepository],
   exports: [SolvesRepository],
 })
 export class SolvesModule {}
