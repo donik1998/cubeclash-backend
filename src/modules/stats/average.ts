@@ -48,6 +48,35 @@ export function trimmedAverage(values: readonly RankingValue[], windowSize: numb
 }
 
 /**
+ * The **best** `aoN` a cuber has ever posted for the event — the record average,
+ * not the current rolling one.
+ *
+ * `GET /stats` reports the *current* ao5 (the trimmed mean of the last five).
+ * A profile wants the opposite question: across the whole history, what is the
+ * lowest ao5 this person ever strung together? So this slides a `windowSize`
+ * window over every consecutive run and keeps the smallest trimmed mean — a
+ * personal-best average, the direct analogue of a personal-best single.
+ *
+ * A window that is itself DNF (two or more DNFs) yields `null` from
+ * `trimmedAverage` and is skipped, never poisoning the record. `null` overall
+ * when there are fewer than `windowSize` values, or when no window produced a
+ * real average.
+ */
+export function bestAverage(values: readonly RankingValue[], windowSize: number): number | null {
+  if (windowSize < 3) return null;
+  if (values.length < windowSize) return null;
+
+  let best: number | null = null;
+  for (let start = 0; start + windowSize <= values.length; start++) {
+    // `trimmedAverage` reads the *last* `windowSize` of what it is given, so
+    // handing it exactly one window makes it average precisely that window.
+    const average = trimmedAverage(values.slice(start, start + windowSize), windowSize);
+    if (average !== null && (best === null || average < best)) best = average;
+  }
+  return best;
+}
+
+/**
  * The "session average": a trimmed mean over the *entire* event history, same
  * rules as any `aoN`. Needs at least three solves (best + worst + one), and is
  * DNF per the same one-tolerated rule.

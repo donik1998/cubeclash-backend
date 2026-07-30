@@ -1,4 +1,4 @@
-import { RankingValue, sessionAverage, trimmedAverage } from './average';
+import { bestAverage, RankingValue, sessionAverage, trimmedAverage } from './average';
 
 /**
  * The trimmed-mean matrix (§4): 0 / 1 / 2 DNFs, exactly the window, fewer than
@@ -63,6 +63,37 @@ describe('trimmedAverage', () => {
       const withTwoDnf: RankingValue[] = [...twelve.slice(0, 10), null, null];
       expect(trimmedAverage(withTwoDnf, 12)).toBeNull();
     });
+  });
+});
+
+describe('bestAverage', () => {
+  it('is the lowest ao5 across every sliding window, not the last one', () => {
+    // Windows of 5 over 7 solves:
+    //   [12,10,8,9,11] → drop 8,12 → mean(9,10,11) = 10
+    //   [10,8,9,11,7]  → drop 7,11 → mean(8,9,10) = 9   ← best
+    //   [8,9,11,7,13]  → drop 7,13 → mean(8,9,11) ≈ 9333
+    const values = [12_000, 10_000, 8_000, 9_000, 11_000, 7_000, 13_000];
+    expect(bestAverage(values, 5)).toBe(9_000);
+  });
+
+  it('skips a window that is itself DNF rather than letting it poison the record', () => {
+    // First window has two DNFs (→ null, skipped); the second is clean.
+    //   [null,null,10,11,12] → null
+    //   [null,10,11,12,9]    → one DNF dropped → mean(10,11,12) = 11
+    const values: RankingValue[] = [null, null, 10_000, 11_000, 12_000, 9_000];
+    expect(bestAverage(values, 5)).toBe(11_000);
+  });
+
+  it('is null below the window', () => {
+    expect(bestAverage([10_000, 9_000, 11_000], 5)).toBeNull();
+  });
+
+  it('is null when no window yields a real average', () => {
+    expect(bestAverage([null, null, null, null, null], 5)).toBeNull();
+  });
+
+  it('equals the single window when there are exactly windowSize solves', () => {
+    expect(bestAverage([10_000, 8_000, 12_000, 9_000, 11_000], 5)).toBe(10_000);
   });
 });
 

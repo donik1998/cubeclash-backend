@@ -5,6 +5,7 @@ import { isKnownEvent } from '../../domain/wca-events';
 import { SolvesRepository } from '../solves/solves.repository';
 import { StatsResponseDto } from './dto/stats-response.dto';
 import { RankingValue, sessionAverage, trimmedAverage } from './average';
+import { histogram } from './distribution';
 
 /**
  * Per-event aggregates: best single, rolling ao5 / ao12 / ao100, session
@@ -32,8 +33,13 @@ export class StatsService {
     }
 
     // Newest-first, tombstones already excluded, `is_pb` and ranking value
-    // computed in SQL over the whole live history.
-    const history = await this.solves.findHistory(userId, event);
+    // computed in SQL over the whole live history. The daily series is a second,
+    // independent read — a SQL `GROUP BY` day — that shares nothing with the
+    // history walk, so the two run concurrently.
+    const [history, progress] = await Promise.all([
+      this.solves.findHistory(userId, event),
+      this.solves.dailyProgress(userId, event),
+    ]);
 
     const solveCount = history.length;
     const pbCount = history.filter((s) => s.isPb).length;
@@ -53,6 +59,9 @@ export class StatsService {
       session_average: sessionAverage(chronological),
       pb_count: pbCount,
       solve_count: solveCount,
+      progress,
+      // The histogram spans the same ranked solves the singles above rank on.
+      distribution: histogram(rankedValues),
     };
   }
 }

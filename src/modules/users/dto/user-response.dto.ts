@@ -28,6 +28,35 @@ export interface PublicUserDto {
   elo: number;
 }
 
+/** The viewer's settled-race record against this profile. Absent → they never raced. */
+export interface HeadToHeadDto {
+  wins: number;
+  losses: number;
+}
+
+/**
+ * `GET /users/:id` — the Player Profile shape: the public identity, plus the
+ * event bests and the viewer-relative head-to-head the profile screen renders.
+ *
+ * Still **no email** — this is someone else's profile (or the public view of
+ * your own), and the email wall applies exactly as it does to `toPublic`.
+ *
+ * The averages are named `ao5` / `ao12` to match `GET /stats`, deliberately: one
+ * name for "average of five" across the whole API. Here they mean the *best*
+ * such average the player ever posted (a record), where on `/stats` they mean
+ * the current rolling one — same field, context decides which record it is.
+ *
+ * `head_to_head` is `null`, not `{ wins: 0, losses: 0 }`, when the two have
+ * never met in a settled race, so the UI can hide the row rather than assert an
+ * 0–0 rivalry that never happened.
+ */
+export interface ProfileUserDto extends PublicUserDto {
+  best_single_ms: number | null;
+  ao5: number | null;
+  ao12: number | null;
+  head_to_head: HeadToHeadDto | null;
+}
+
 /** The caller's own view — includes `email`. */
 export function toSelf(user: User): SelfUserDto {
   return {
@@ -47,5 +76,24 @@ export function toPublic(user: User): PublicUserDto {
     display_name: user.displayName,
     country: user.country,
     elo: user.elo,
+  };
+}
+
+/** The public identity widened with the profile screen's bests and head-to-head. */
+export function toProfile(
+  user: User,
+  extras: {
+    best_single_ms: number | null;
+    ao5: number | null;
+    ao12: number | null;
+    head_to_head: HeadToHeadDto | null;
+  },
+): ProfileUserDto {
+  return {
+    ...toPublic(user),
+    best_single_ms: extras.best_single_ms,
+    ao5: extras.ao5,
+    ao12: extras.ao12,
+    head_to_head: extras.head_to_head,
   };
 }

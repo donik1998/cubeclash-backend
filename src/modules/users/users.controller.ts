@@ -1,9 +1,10 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Query, UseGuards } from '@nestjs/common'; // prettier-ignore
 
 import { CurrentUser } from '../auth/current-user.decorator';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { UpdateMeDto } from './dto/update-me.dto';
-import { PublicUserDto, SelfUserDto, toPublic, toSelf } from './dto/user-response.dto';
+import { UserProfileQueryDto } from './dto/user-profile-query.dto';
+import { ProfileUserDto, SelfUserDto, toSelf } from './dto/user-response.dto';
 import { UserProfilePatch } from './users.repository';
 import { UsersService } from './users.service';
 
@@ -16,8 +17,9 @@ import { UsersService } from './users.service';
  * the retirement of the raw user-id header stand-in: identity is the token now.
  *
  * The self/public split is enforced here by *choosing the mapper per route*:
- * `/me` returns `toSelf` (email included, it is yours), `/users/:id` returns
- * `toPublic` (no email, ever — §1.7). An unknown id is a `404`, not a leak.
+ * `/me` returns `toSelf` (email included, it is yours), `/users/:id` returns the
+ * profile shape (no email, ever — §1.7; the email wall holds because `toProfile`
+ * builds on `toPublic`). An unknown id is a `404`, not a leak.
  */
 @Controller()
 @UseGuards(JwtAuthGuard)
@@ -46,8 +48,12 @@ export class UsersController {
   }
 
   @Get('users/:id')
-  async getUser(@Param('id', ParseUUIDPipe) id: string): Promise<{ user: PublicUserDto }> {
-    const user = await this.users.getById(id);
-    return { user: toPublic(user) };
+  async getUser(
+    @CurrentUser('id') viewerId: string,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: UserProfileQueryDto,
+  ): Promise<{ user: ProfileUserDto }> {
+    const user = await this.users.getProfile(viewerId, id, query.event);
+    return { user };
   }
 }

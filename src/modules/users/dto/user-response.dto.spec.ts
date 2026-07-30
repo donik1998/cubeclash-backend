@@ -1,5 +1,5 @@
 import { User } from '../../../db/schema';
-import { toPublic, toSelf } from './user-response.dto';
+import { toProfile, toPublic, toSelf } from './user-response.dto';
 
 /**
  * The email-leak wall (§1.7): the self shape may carry `email`; the public shape
@@ -51,5 +51,28 @@ describe('user response shapes', () => {
     const anon: User = { ...user, country: null };
     expect(toSelf(anon).country).toBeNull();
     expect(toPublic(anon).country).toBeNull();
+  });
+
+  it('profile widens the public shape with bests and head-to-head, still no email', () => {
+    const dto = toProfile(user, {
+      best_single_ms: 6_289,
+      ao5: 6_862,
+      ao12: 6_830,
+      head_to_head: { wins: 3, losses: 1 },
+    });
+
+    expect(dto).toEqual({
+      id: user.id,
+      display_name: 'Ada',
+      country: 'GB',
+      elo: 1180,
+      best_single_ms: 6_289,
+      ao5: 6_862,
+      ao12: 6_830,
+      head_to_head: { wins: 3, losses: 1 },
+    });
+    expect(dto).not.toHaveProperty('email');
+    expect(dto).not.toHaveProperty('password_hash');
+    expect(dto).not.toHaveProperty('passwordHash');
   });
 });

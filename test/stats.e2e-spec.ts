@@ -63,7 +63,7 @@ describe('stats (e2e)', () => {
     const res = await stats('3x3');
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({
+    expect(res.body).toMatchObject({
       event: '3x3',
       best_single_ms: 8_000,
       ao5: 10_000, // drop 8 and 12 → mean(9,10,11) = 10
@@ -73,6 +73,15 @@ describe('stats (e2e)', () => {
       pb_count: 2,
       solve_count: 5,
     });
+    // All five solves are on 2026-07-01 → a single progress point.
+    expect(res.body.progress).toEqual([
+      { day: '2026-07-01', best_ms: 8_000, average_ms: 10_000, solve_count: 5 },
+    ]);
+    // The histogram covers all five ranked singles, fastest bucket first.
+    expect(res.body.distribution.reduce((s: number, b: { count: number }) => s + b.count, 0)).toBe(
+      5,
+    );
+    expect(res.body.distribution[0].from_ms).toBe(8_000);
   });
 
   it('tolerates one DNF in the ao5 and still reports a best single', async () => {
@@ -98,6 +107,8 @@ describe('stats (e2e)', () => {
       session_average: null,
       pb_count: 0,
       solve_count: 0,
+      progress: [], // never null — an empty array so the chart can iterate
+      distribution: [],
     });
   });
 
@@ -121,6 +132,54 @@ describe('stats (e2e)', () => {
     expect(cube.body.solve_count).toBe(1);
     expect(two.body.best_single_ms).toBe(2_000);
     expect(two.body.solve_count).toBe(3);
+  });
+
+  it('reports one progress point per day with a ranked solve, ascending, DNFs excluded', async () => {
+    const post = (day: number, index: number, timeMs: number | null) =>
+      http()
+        .post('/solves')
+        .set('Authorization', auth)
+        .send({
+          event: '3x3',
+          scramble: "R U R' U'",
+          scramble_source: 'random',
+          time_ms: timeMs ?? 30_000,
+          penalty: timeMs === null ? 'dnf' : 'none',
+          solved_at: new Date(Date.UTC(2026, 6, day, 12, index)).toISOString(),
+          client_id: `p-${day}-${index}`,
+        });
+
+    // Day 20: 6000 + 7000 → best 6000, mean 6500, count 2.
+    // Day 21: 6289 and a DNF → the DNF drops out, so best/mean 6289, count 1.
+    await post(20, 0, 6_000);
+    await post(20, 1, 7_000);
+    await post(21, 0, 6_289);
+    await post(21, 1, null);
+
+    const res = await stats('3x3');
+
+    expect(res.body.progress).toEqual([
+      { day: '2026-07-20', best_ms: 6_000, average_ms: 6_500, solve_count: 2 },
+      { day: '2026-07-21', best_ms: 6_289, average_ms: 6_289, solve_count: 1 },
+    ]);
+  });
+
+  it('bins ranked singles into contiguous buckets spanning fastest→slowest', async () => {
+    await seed('3x3', [6_000, 6_100, 6_200, 6_300, 6_400, 6_500, null]);
+
+    const dist = (await stats('3x3')).body.distribution as Array<{
+      from_ms: number;
+      to_ms: number;
+      count: number;
+    }>;
+
+    // The DNF is excluded, so six singles are binned.
+    expect(dist.reduce((s, b) => s + b.count, 0)).toBe(6);
+    expect(dist[0].from_ms).toBe(6_000);
+    expect(dist[dist.length - 1].to_ms).toBe(6_501); // max + 1, so the slowest is counted
+    for (let i = 0; i < dist.length - 1; i++) {
+      expect(dist[i].to_ms).toBe(dist[i + 1].from_ms); // contiguous, no gaps
+    }
   });
 
   it('rejects an unknown event', async () => {

@@ -35,6 +35,18 @@ export interface SolveHistoryPage {
   nextCursor: string | null;
 }
 
+/** One point on the Stats screen's progress chart — a single day's ranked solves. */
+export interface DailyProgressPoint {
+  /** Plain ISO date, `YYYY-MM-DD`, in UTC. No time component. */
+  day: string;
+  /** Best (minimum) ranking key that day. */
+  best_ms: number;
+  /** Mean ranking key that day, rounded to a whole millisecond. */
+  average_ms: number;
+  /** Ranked (non-DNF) solves recorded that day. */
+  solve_count: number;
+}
+
 @Injectable()
 export class SolvesRepository {
   constructor(@Inject(DRIZZLE) private readonly db: Database) {}
@@ -64,6 +76,46 @@ export class SolvesRepository {
     return this.rankedSelect()
       .where(and(eq(solves.userId, userId), eq(solves.event, event), eq(solves.deleted, false)))
       .orderBy(desc(solves.solvedAt), desc(solves.id));
+  }
+
+  /**
+   * A day-by-day progress series for one event: for every calendar day that has
+   * at least one ranked solve, its best, mean and count — ascending by day.
+   *
+   * Grouped in SQL with `date_trunc`, not walked in TypeScript: the day bucket
+   * *is* a `GROUP BY`, and pushing it to Postgres means one indexed aggregate
+   * instead of pulling the whole history over the wire to fold it here.
+   *
+   * The day is computed in **UTC** (`solved_at at time zone 'UTC'`) so the
+   * series is stable regardless of the server's or connection's timezone — the
+   * wire contract's timestamps are UTC, and the buckets match them.
+   *
+   * DNFs are excluded by `ranking_key is not null`, which — like `deleted =
+   * false` beside it — runs in WHERE, before the aggregates, so a DNF neither
+   * counts toward a day nor drags its mean. `min`/`avg`/`count` are cast to
+   * `int` so the driver returns JS numbers rather than numeric/bigint strings.
+   */
+  async dailyProgress(userId: string, event: string): Promise<DailyProgressPoint[]> {
+    const day = sql<string>`to_char((${solves.solvedAt} at time zone 'UTC')::date, 'YYYY-MM-DD')`;
+
+    return this.db
+      .select({
+        day,
+        best_ms: sql<number>`min(${rankingKey})::int`,
+        average_ms: sql<number>`round(avg(${rankingKey}))::int`,
+        solve_count: sql<number>`count(*)::int`,
+      })
+      .from(solves)
+      .where(
+        and(
+          eq(solves.userId, userId),
+          eq(solves.event, event),
+          eq(solves.deleted, false),
+          sql`${rankingKey} is not null`,
+        ),
+      )
+      .groupBy(day)
+      .orderBy(asc(day));
   }
 
   /** The single best attempt for an event, or null if every attempt is a DNF. */
