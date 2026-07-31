@@ -1,13 +1,23 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, ne, sql } from 'drizzle-orm';
 
 import { DRIZZLE, Database } from '../../db/drizzle.module';
-import { Race, raceParticipants, races, users } from '../../db/schema';
+import { NewRace, Race, RaceParticipant, raceParticipants, races, users } from '../../db/schema';
 import { Competitor, HeadToHead, RaceCompetitorRow, RaceWithCompetitors } from './race.types';
 
 export interface RaceHistoryPage {
   items: RaceWithCompetitors[];
   nextCursor: string | null;
+}
+
+/** What settlement writes back for one participant. */
+export interface ParticipantSettlement {
+  userId: string;
+  result: NonNullable<RaceParticipant['result']>;
+  timeMs: number | null;
+  penalty: RaceParticipant['penalty'];
+  /** Signed rating change; applied to `users.elo` in the same transaction. */
+  eloDelta: number;
 }
 
 /**
@@ -21,6 +31,150 @@ export interface RaceHistoryPage {
 @Injectable()
 export class RaceRepository {
   constructor(@Inject(DRIZZLE) private readonly db: Database) {}
+
+  // ------------------------------------------------------------------ writes
+  //
+  // The reads below compose a race; these five mutate one. They are kept
+  // deliberately dumb — no business rules, no event validation, no
+  // authorization. `RaceService` decides *whether* a transition is legal; the
+  // repository only performs it. The gateway drives ready / submit / settle
+  // through the service, never through here directly.
+
+  /**
+   * Open a room and seat its creator as the first participant, atomically.
+   *
+   * One transaction, because a `races` row with no `race_participants` row is a
+   * room nobody is in — a state the lobby read would render as an empty race.
+   * The insert and the seating must both land or neither does.
+   *
+   * The caller supplies `code` already generated (or null for quick match); the
+   * partial unique index is what actually enforces uniqueness, so a collision
+   * surfaces here as a thrown `23505` for the service's retry loop to catch.
+   */
+  async createRoom(input: NewRace): Promise<Race> {
+    return this.db.transaction(async (tx) => {
+      const [race] = await tx.insert(races).values(input).returning();
+      await tx.insert(raceParticipants).values({ raceId: race.id, userId: race.createdBy });
+      return race;
+    });
+  }
+
+  /**
+   * Seat a second player in a waiting room.
+   *
+   * `onConflictDoNothing` on the `(race_id, user_id)` PK makes a re-join
+   * idempotent — a client that fires `POST /races/join` twice does not get a
+   * duplicate-key error, it gets the same seat. The boolean return says whether
+   * a *new* seat was taken, which the service needs to reject a room that filled
+   * between its capacity check and this insert.
+   */
+  async addParticipant(raceId: string, userId: string): Promise<{ seated: boolean }> {
+    const inserted = await this.db
+      .insert(raceParticipants)
+      .values({ raceId, userId })
+      .onConflictDoNothing({ target: [raceParticipants.raceId, raceParticipants.userId] })
+      .returning({ userId: raceParticipants.userId });
+
+    return { seated: inserted.length > 0 };
+  }
+
+  /** Count the seats in a room — the capacity check reads this before seating. */
+  async countParticipants(raceId: string): Promise<number> {
+    const [row] = await this.db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(raceParticipants)
+      .where(eq(raceParticipants.raceId, raceId));
+    return row?.n ?? 0;
+  }
+
+  /** Flip one participant's ready flag. Returns false if they are not in the room. */
+  async setReady(raceId: string, userId: string, ready: boolean): Promise<boolean> {
+    const updated = await this.db
+      .update(raceParticipants)
+      .set({ ready })
+      .where(and(eq(raceParticipants.raceId, raceId), eq(raceParticipants.userId, userId)))
+      .returning({ userId: raceParticipants.userId });
+    return updated.length > 0;
+  }
+
+  /** Move a room to a new status (waiting → countdown → racing → settled). */
+  async setStatus(raceId: string, status: Race['status']): Promise<void> {
+    await this.db.update(races).set({ status }).where(eq(races.id, raceId));
+  }
+
+  /**
+   * Record a finish for one participant — the durable half of `solve:stop`.
+   *
+   * Idempotent by the same rule the gateway enforces in Redis: the update only
+   * lands on a row that has **not** already finished (`finished_at is null`), so
+   * a duplicate submit writes nothing and returns false. The server owns
+   * `finished_at`; `timeMs`/`penalty` are the validated values the service
+   * passed, never the raw client number.
+   */
+  async recordFinish(
+    raceId: string,
+    userId: string,
+    input: { timeMs: number; penalty: RaceParticipant['penalty']; finishedAt: Date },
+  ): Promise<{ recorded: boolean }> {
+    const updated = await this.db
+      .update(raceParticipants)
+      .set({ timeMs: input.timeMs, penalty: input.penalty, finishedAt: input.finishedAt })
+      .where(
+        and(
+          eq(raceParticipants.raceId, raceId),
+          eq(raceParticipants.userId, userId),
+          sql`${raceParticipants.finishedAt} is null`,
+        ),
+      )
+      .returning({ userId: raceParticipants.userId });
+
+    return { recorded: updated.length > 0 };
+  }
+
+  /**
+   * Settle a race: freeze every result, stamp `settled_at`, and pay out Elo —
+   * all in one transaction so a crash mid-settlement cannot leave a race that is
+   * marked `settled` but whose ratings never moved, or vice versa.
+   *
+   * Only settles a race that is **not already settled** (the `ne` guard), so a
+   * duplicate settle — two instances racing to expire the same grace window — is
+   * a no-op that returns `false` rather than double-paying Elo. That guard is
+   * the whole reason this is server-authoritative and idempotent.
+   *
+   * `result` is written, not derived: `left` records a walkout that no
+   * comparison of times could reconstruct — see the schema doc comment.
+   */
+  async settle(
+    raceId: string,
+    settlements: ParticipantSettlement[],
+  ): Promise<{ settled: boolean }> {
+    return this.db.transaction(async (tx) => {
+      const [race] = await tx
+        .update(races)
+        .set({ status: 'settled', settledAt: new Date() })
+        .where(and(eq(races.id, raceId), ne(races.status, 'settled')))
+        .returning({ id: races.id });
+
+      // Lost the race to settle first: another worker already paid this out.
+      if (!race) return { settled: false };
+
+      for (const s of settlements) {
+        await tx
+          .update(raceParticipants)
+          .set({ result: s.result, timeMs: s.timeMs, penalty: s.penalty })
+          .where(and(eq(raceParticipants.raceId, raceId), eq(raceParticipants.userId, s.userId)));
+
+        if (s.eloDelta !== 0) {
+          await tx
+            .update(users)
+            .set({ elo: sql`${users.elo} + ${s.eloDelta}` })
+            .where(eq(users.id, s.userId));
+        }
+      }
+
+      return { settled: true };
+    });
+  }
 
   /**
    * The join, in one place. Everything below reuses it, so the competitor shape
@@ -54,6 +208,51 @@ export class RaceRepository {
       .orderBy(desc(sql`${raceParticipants.userId} = ${races.createdBy}`), asc(users.displayName));
 
     return groupByRace(rows)[0] ?? null;
+  }
+
+  /**
+   * Resolve a join code to the *active* room holding it, or null.
+   *
+   * **Must filter on status.** The unique index on `code` is partial — it only
+   * covers rooms where `status <> 'settled'` — so a settled room releases its
+   * code back into the pool and a bare `where code = ?` could resolve a finished
+   * race (or two, if the code was later reused). Narrowing to non-settled here
+   * is what makes join-by-code correct, not just the index.
+   */
+  async findActiveByCode(code: string): Promise<Race | null> {
+    const [race] = await this.db
+      .select()
+      .from(races)
+      .where(and(eq(races.code, code), ne(races.status, 'settled')))
+      .limit(1);
+    return race ?? null;
+  }
+
+  /**
+   * The one race a user is currently *in-flight* in, with its competitors, or null.
+   *
+   * "In-flight" is any non-settled room the user is a participant of — what the
+   * gateway needs on a socket **reconnect** to re-seat a dropped player back into
+   * their room within the grace window (spec §10), without the client having to
+   * re-send a code it may not have (quick match has none).
+   *
+   * A user is only ever in one live race at a time (a room is 1v1 and joining a
+   * second would need leaving the first), so `limit 1` on the newest is exact,
+   * not a lossy pick. The page-then-join shape mirrors `findHistory`: settle the
+   * single race id first, then apply the competitor join to it, so the returned
+   * race is never missing an opponent.
+   */
+  async findActiveRaceForUser(userId: string): Promise<RaceWithCompetitors | null> {
+    const [active] = await this.db
+      .select({ id: races.id })
+      .from(races)
+      .innerJoin(raceParticipants, eq(raceParticipants.raceId, races.id))
+      .where(and(eq(raceParticipants.userId, userId), ne(races.status, 'settled')))
+      .orderBy(desc(races.createdAt))
+      .limit(1);
+
+    if (!active) return null;
+    return this.findWithCompetitors(active.id);
   }
 
   /** Every joinable room for an event — the lobby list, with who is already waiting. */
