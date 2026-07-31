@@ -8,7 +8,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { Request } from 'express';
+import { Request, Response } from 'express';
 import type Redis from 'ioredis';
 
 import { ErrorCode } from '../errors/error-codes';
@@ -63,6 +63,18 @@ export class RateLimitGuard implements CanActivate {
     }
 
     if (count > options.limit) {
+      // A 429 without `Retry-After` forces every client to guess, and clients
+      // guess badly — they either hammer the endpoint or back off far longer
+      // than needed. RFC 6585 says SHOULD; there is no reason not to, because
+      // the window's remaining TTL is the exact answer and Redis already knows
+      // it. `ttl` returns -1 (key with no expiry) or -2 (key gone, having
+      // expired between the INCR and here); both mean "the window is about to
+      // roll", so fall back to the full window rather than sending a nonsense
+      // negative.
+      const retryAfter = await this.retryAfterSeconds(key, options.windowSeconds);
+      const response = context.switchToHttp().getResponse<Response>();
+      response.setHeader('Retry-After', String(retryAfter));
+
       throw new HttpException(
         { code: ErrorCode.RATE_LIMITED, message: 'Too many requests; please slow down' },
         HttpStatus.TOO_MANY_REQUESTS,
@@ -70,6 +82,18 @@ export class RateLimitGuard implements CanActivate {
     }
 
     return true;
+  }
+
+  /** Seconds until this window rolls, clamped to at least 1 so a client never busy-loops. */
+  private async retryAfterSeconds(key: string, windowSeconds: number): Promise<number> {
+    try {
+      const ttl = await this.redis.ttl(key);
+      return ttl > 0 ? ttl : windowSeconds;
+    } catch {
+      // Same fail-open posture as the counter itself: a Redis blip must not
+      // turn a throttle into a 500.
+      return windowSeconds;
+    }
   }
 
   /** `ratelimit:<METHOD path>:<ip>` — one window per route per client. */
